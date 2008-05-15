@@ -1,0 +1,56 @@
+
+# Xen host servers (dom0)
+vm_host_servers = {
+
+}
+
+# Physical servers without virtualization
+physical_servers = {
+
+}
+
+# Xen domains (domU)
+virtual_servers = {
+
+    'example-mysql-master.example.com': {
+     'db': {
+      'exampledbname': {
+       'type': 'master',
+      }
+     },
+    },
+
+}
+
+# hot spares
+standby_servers = {
+    'example-mysql-slave.example.com': {
+     'db': {
+      'exampledbname': {
+       'type': 'slave',
+       'master': 'example-mysql-master.example.com',
+      },
+     },
+    },
+}
+
+# servers that should NOT be backed up or have anything installed or updated, but should still be monitored.
+special_servers = {
+}
+
+##### DON'T CHANGE ANYTHING BELOW THIS LINE #####
+
+def munge(*blocks):
+    r = {}
+    for b in blocks:
+        r.update(b)
+    return r
+
+# 'servers' var includes all servers
+servers = munge(
+    vm_host_servers,
+    physical_servers,
+    virtual_servers,
+    special_servers,
+    standby_servers)
+

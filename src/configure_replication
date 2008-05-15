@@ -1,0 +1,247 @@
+#!/usr/bin/python -u
+
+# Copyright (c) 2007-2008 Broadband Mechanics, Inc.
+# 
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+# 
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+import getopt, pprint, random, re, select, socket, sys, time
+
+# packaged ext lib
+from lib import paramiko
+
+# internal libs
+from lib import tools
+
+class SQLException(Exception):
+    pass
+
+class Main(tools.Script):
+    def __init__(self):
+        self.conn = {}
+    
+    def main(self):
+        print "Setting up replication"
+
+        self.do_clean = self.do_dump = 1
+        opts, args = getopt.getopt(sys.argv[1:], "", ["noclean", "nodump"])
+        for k,v in opts:
+            if k == '--noclean':
+                self.do_clean = 0
+            if k == '--nodump':
+                self.do_dump = 0
+
+        try:
+            master, slave, db = args
+        except ValueError:
+            print "Syntax: %s <master hostname> <slave hostname> <database>" % sys.argv[0]
+            return
+        master, master_info = tools.find_host(master)
+        slave, slave_info = tools.find_host(slave)
+
+        print "  master: %s" % master,
+        master_ip = socket.gethostbyname(master)
+        print "(%s)" % master_ip
+        print "  slave: %s" % slave,
+        slave_ip = socket.gethostbyname(slave)
+        print "(%s)" % slave_ip
+        print "  db: %s" % db
+
+        # the master should have this db
+        md = master_info['db']
+        assert md.has_key(db), "master's 'db' section in config.py does not have an entry for db %s" % db
+        md = md[db]
+        assert md['type'] == 'master'
+        # the slave should have this db and be set up as a slabe
+        sd = slave_info['db']
+        assert sd.has_key(db), "slave's 'db' section in config.py does not have an entry for db %s" % db
+        sd = sd[db]
+        assert sd['type'] == 'slave'
+        assert sd['master'] == master
+
+        # validation done, now let's configure it.
+
+        # connect to master and slave
+        master_ssh = self.connect(master, "master", master_info.get('aka'))
+        slave_ssh = self.connect(slave, "slave", slave_info.get('aka'))
+
+        # make sure errors are caught correctly
+        for where in ('master', 'slave'):
+            try:
+                self.run(where, "some broken command;")
+                raise Exception("error handling failing on %s - internal trouble" % where)
+            except SQLException:
+                # this is correct
+                pass
+
+        seen_ids = []
+        for what, ssh in [
+            ("master", master_ssh),
+            ("slave", slave_ssh),
+            ]:
+            print "checking mysql config on %s" % what
+            cnf = ssh.exec_command("cat /etc/mysql/my.cnf")[1].readlines()
+
+            server_id = None
+            do_db = ""
+            for line in cnf:
+                p = line.find("#")
+                if p != -1: line = line[:p]
+                line = line.rstrip()
+                if not line: continue
+
+                m = re.search(r"^server-id\s*=\s*(.*?)$", line)
+                if m: server_id = m.group(1)
+
+                m = re.search(r"^replicate-do-db\s*=\s*(.*?)$", line)
+                if m: do_db = m.group(1)
+
+            if not server_id:
+                print "%s is missing a server-id line!  it should have a line in /etc/mysql/my.cnf looking like this:\nserver-id = 1234" % what
+                return
+
+            if server_id in seen_ids:
+                print "server-id %s (%s) has been used somewhere else!  please set it to a unique value."
+                return
+            seen_ids.append(server_id)
+            
+            if what == 'slave' and db not in do_db.split():
+                print "slave should have a line in /etc/mysql/my.cnf looking like this:"
+                print "replicate-do-db = %s" % db
+                return
+        
+        # make password
+        repl_pw = pw = "".join([random.choice("abcdefghijklnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for x in range(30)])
+
+        # create replication user on master
+        self.run('master', "GRANT RELOAD, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO repl@'%s' IDENTIFIED BY '%s';" % (slave_ip, repl_pw))
+        self.run('master', "GRANT SELECT ON `%s`.* TO repl@'%s' IDENTIFIED BY '%s';" % (db, slave_ip, repl_pw)) # so we can mysqldump
+        self.run('master', "FLUSH PRIVILEGES;")
+
+        # stop slave, set master_host etc on slave
+        self.run('slave', "SLAVE STOP; CHANGE MASTER TO MASTER_HOST='%s', MASTER_USER='repl', MASTER_PASSWORD='%s';" % (master_ip, repl_pw))
+
+        if self.do_clean:
+            # create backup db, rename all tables out of current one into backup
+            dbs = [x[0] for x in self.run('slave', "SHOW DATABASES;")[1:]]
+
+            if db not in dbs:
+                print "slave doesn't already have a %s db, so no need to back up" % db
+                self.run('slave', "CREATE DATABASE `%s`;" % db)
+            else:
+                backup_suffix = time.strftime("%Y%m%d_%H%M%S")
+                backup_db = "%s_%s" % (db, backup_suffix)
+                assert backup_db not in dbs, "weird: there's already a backup db created this second: %s" % backup_db
+                self.run('slave', "CREATE DATABASE `%s`;" % backup_db)
+                tables = [x[0] for x in self.run('slave', "USE `%s`; SHOW TABLES" % db)[1:]]
+
+                for s in range(0, len(tables), 500):
+                    cmd = []
+                    for table in tables[s:s+1000]:
+                        cmd.append("RENAME TABLE `%s`.`%s` TO `%s`.`%s`;" % (db, table, backup_db, table))
+                    self.run('slave', "\n".join(cmd))
+
+                # verify that there are no tables in the original any more
+                tables = [x[0] for x in self.run('slave', "USE `%s`; SHOW TABLES;" % db)[1:]]
+                assert not len(tables), "the following tables remain in the %s database; they should all have been moved to the backup db: %s" % (db, ", ".join(tables))
+
+        if self.do_dump:
+            # dump everything using mysqldump --master-data on the master and read it in on the slave
+            slave_fn = "repl-import-%s-from-%s.sql" % (db, master)
+            print "Dumping to %s on slave" % slave_fn
+            si, so, se = slave_ssh.exec_command("mysqldump -h %s -u repl -p%s --master-data --verbose %s > %s" % (master_ip, repl_pw, db, slave_fn))
+            while 1:
+                line = se.readline()
+                if not line: break
+                print "  %s" % line.strip()
+
+        # now revoke unnecessary privs
+        self.run('master', "REVOKE RELOAD, REPLICATION CLIENT ON *.* FROM repl@'%s';" % (slave_ip))
+        self.run('master', "REVOKE SELECT ON `%s`.* FROM repl@'%s';" % (db, slave_ip))
+
+        if self.do_dump:
+            # now load in the dump on the slave
+            self.run('slave', "USE `%s`; SOURCE %s;" % (db, slave_fn))
+            self.run('slave', "SLAVE START")
+            pprint.pprint(zip(*self.run('slave', "SHOW SLAVE STATUS")))
+            print "Check that the two threads are running there..."
+        else:
+            print "Now you need to FLUSH TABLES WITH READ LOCK and SHOW MASTER STATUS on the master, then manually copy the data over to the slave and use a CHANGE MASTER statement and SLAVE START to get it all going"
+            print "e.g.: CHANGE MASTER TO MASTER_LOG_FILE='mysql-bin.000402', MASTER_LOG_POS=240"
+
+    def run(self, where, sql):
+        print "[%s] %s" % (where, sql)
+        chan = self.conn[where].get_transport().open_session()
+        chan.setblocking(1)
+        chan.exec_command("mysql -A")
+        chan.sendall(sql + "\n")
+        chan.shutdown_write()
+        chan.setblocking(0)
+        out = []
+        err = []
+        while 1:
+            #print "sel"
+            select.select([chan], [], [], 1)
+            #print "chk..."
+            closed = 0
+
+            try:
+                d = chan.recv(1024)
+                if len(d):
+                    print "recv "+`d`
+                    out.append(d)
+                else:
+                    closed = 1
+            except socket.timeout:
+                #print "r to"
+                pass
+
+            try:
+                e = chan.recv_stderr(1024)
+                if len(e):
+                    print "recv_err "+`e`
+                    err.append(e)
+                else:
+                    closed = 1
+            except socket.timeout:
+                #print "e to"
+                pass
+            
+            if closed: break
+        if len(err):
+            raise SQLException("".join(err))
+        return [x.split("\t") for x in "".join(out).strip().split("\n")]
+
+    def connect(self, host, host_type, hostname=None):
+        if hostname is None: hostname = host
+        ssh = paramiko.SSHClient()
+        ssh.load_system_host_keys()
+        print "Opening SSH connection to %s" % host
+        ssh.connect(host, username="root")
+        #print "Checking username"
+        #assert ssh.exec_command("whoami")[1].read().strip() == "root"
+        print "Checking hostname"
+        read_host = ssh.exec_command("hostname")[1].read().strip()
+        assert read_host == hostname, "%s hostname incorrect: read as %s, expected %s" % (host_type, read_host, hostname)
+
+        self.conn[host_type] = ssh
+        return ssh
+
+if __name__ == '__main__':
+    tools.run_in_script_dir(Main().main)

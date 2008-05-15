@@ -1,0 +1,47 @@
+Here are some scripts (starting from just one... more to come as I get
+around to doing the work to decouple them from our systems) I wrote at
+Broadband Mechanics to help make the my life and the lives of the
+other sysadmins easier.  Hopefully others might find them useful too!
+
+src/configure_replication
+
+  This configures MySQL replication on a pair of MySQL servers,
+  handling setting up the replication slave user, dumping the master
+  database, moving an existing DB out of the way on the slave, and
+  loading the data into the slave.
+
+First, you'll need to create a file called config.py that describes
+your servers.  Copy src/config.py.sample to src/config.py and follow
+the prompts.
+
+- Phillip Pearson
+  http://www.broadbandmechanics.com/
+  Contact: http://www.myelin.co.nz/phil/email.php
+
+All of the original work here is covered by the following license.
+
+  Copyright (c) 2007-2008 Broadband Mechanics, Inc.
+
+  Permission is hereby granted, free of charge, to any person
+  obtaining a copy of this software and associated documentation files
+  (the "Software"), to deal in the Software without restriction,
+  including without limitation the rights to use, copy, modify, merge,
+  publish, distribute, sublicense, and/or sell copies of the Software,
+  and to permit persons to whom the Software is furnished to do so,
+  subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+  BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+  ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+Various libraries are included, with their own licenses:
+
+- src/lib/paramiko: GNU Lesser General Public License v2.1+
